@@ -1,5 +1,12 @@
 # PHP_Laravel12_Reliese_Model_Generator
 
+<p align="center">
+<a href="#"><img src="https://img.shields.io/badge/Laravel-12-red" alt="Laravel Version"></a>
+<a href="#"><img src="https://img.shields.io/badge/PHP-8.2+-blue" alt="PHP Version"></a>
+<a href="#"><img src="https://img.shields.io/badge/Database-MySQL-green" alt="Database"></a>
+<a href="#"><img src="https://img.shields.io/badge/Reliese-Model_Generator-orange" alt="Reliese Package"></a>
+</p>
+
 ---
 
 ##  Overview
