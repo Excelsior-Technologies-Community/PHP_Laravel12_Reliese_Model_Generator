@@ -5,7 +5,8 @@
 
     <meta charset="UTF-8">
 
-    <meta name="viewport"
+    <meta
+        name="viewport"
         content="width=device-width, initial-scale=1.0">
 
     <title>Reliese Model Generation Manager</title>
@@ -18,191 +19,341 @@
 
 <body class="bg-light">
 
-<nav class="navbar navbar-dark bg-dark">
+    <nav class="navbar navbar-dark bg-dark">
 
-    <div class="container">
+        <div class="container">
 
-        <a class="navbar-brand fw-bold"
-            href="{{ route('reliese.dashboard') }}">
-            Reliese Model Generator
-        </a>
+            <a
+                class="navbar-brand fw-bold"
+                href="{{ route('reliese.dashboard') }}">
 
-        <a href="{{ route('reliese.dashboard') }}"
-            class="btn btn-outline-light btn-sm">
-            Dashboard
-        </a>
+                Reliese Model Generator
 
-    </div>
+            </a>
 
-</nav>
+            <a
+                href="{{ route('reliese.dashboard') }}"
+                class="btn btn-outline-light btn-sm">
 
-<div class="container py-5">
+                Dashboard
 
-    <h1 class="fw-bold">
-        🔄 Model Generation Manager
-    </h1>
-
-    <p class="text-muted mb-4">
-
-        Generate Reliese models directly from the Laravel dashboard.
-
-    </p>
-
-    @if($message)
-
-        <div class="alert alert-success">
-
-            <strong>Success:</strong>
-            {{ $message }}
+            </a>
 
         </div>
 
-    @endif
+    </nav>
 
-    @if($error)
 
-        <div class="alert alert-danger">
+    <div class="container py-5">
 
-            <strong>Error:</strong>
-            {{ $error }}
+        <h1 class="fw-bold">
+            🔄 Model Generation Manager
+        </h1>
 
-        </div>
+        <p class="text-muted mb-4">
 
-    @endif
+            Generate or regenerate Reliese models directly
+            from the Laravel dashboard.
 
-    <div class="card shadow-sm border-0 mb-4">
+        </p>
 
-        <div class="card-body">
 
-            <h4>
-                Generate All Models
-            </h4>
+        {{-- Session success --}}
 
-            <p class="text-muted">
+        @if(session('success'))
 
-                Runs:
+        <div
+            class="alert alert-success alert-dismissible fade show">
 
-                <code>
-                    php artisan code:models
-                </code>
+            <strong>✓ Success</strong>
 
-            </p>
+            <div>
+                {{ session('success') }}
+            </div>
 
-            <form method="POST"
-                action="{{ route('reliese.generate') }}">
-
-                @csrf
-
-                <button
-                    type="submit"
-                    class="btn btn-success">
-
-                    🔄 Generate All Models
-
-                </button>
-
-            </form>
+            <button
+                type="button"
+                class="btn-close"
+                data-bs-dismiss="alert">
+            </button>
 
         </div>
 
-    </div>
+        @endif
 
-    <div class="card shadow-sm border-0">
 
-        <div class="card-header bg-dark text-white">
+        {{-- Error --}}
 
-            Generate Specific Table
+        @if($error)
+
+        <div
+            class="alert alert-danger alert-dismissible fade show">
+
+            <strong>✗ Error</strong>
+
+            <div>
+                {{ $error }}
+            </div>
+
+            <button
+                type="button"
+                class="btn-close"
+                data-bs-dismiss="alert">
+            </button>
 
         </div>
 
-        <div class="card-body">
+        @endif
 
-            <form method="POST"
-                action="{{ route('reliese.generate') }}">
 
-                @csrf
+        {{-- Generation details --}}
 
-                <div class="row g-3">
+        @if(session('generation_details'))
 
-                    <div class="col-md-9">
+        <div class="card shadow-sm border-0 mb-4">
 
-                        <select
-                            name="table"
-                            class="form-select"
-                            required>
+            <div class="card-header bg-dark text-white">
 
-                            <option value="">
-                                Select database table
-                            </option>
+                Regeneration Details
 
-                            @foreach($tables as $table)
+            </div>
+
+            <div class="card-body">
+
+                @foreach(session('generation_details') as $detail)
+
+                <div class="mb-2">
+
+                    @if(str_starts_with($detail, '✓'))
+
+                    <span class="text-success">
+                        {{ $detail }}
+                    </span>
+
+                    @else
+
+                    <span class="text-danger">
+                        {{ $detail }}
+                    </span>
+
+                    @endif
+
+                </div>
+
+                @endforeach
+
+            </div>
+
+        </div>
+
+        @endif
+
+
+        {{-- Generate all --}}
+
+        <div class="card shadow-sm border-0 mb-4">
+
+            <div class="card-body">
+
+                <h4>
+                    Generate All Models
+                </h4>
+
+                <p class="text-muted">
+
+                    Runs:
+
+                    <code>
+                        php artisan code:models
+                    </code>
+
+                </p>
+
+                <form
+                    method="POST"
+                    action="{{ route('reliese.generate') }}">
+
+                    @csrf
+
+                    <button
+                        type="submit"
+                        class="btn btn-success">
+
+                        🔄 Generate All Models
+
+                    </button>
+
+                </form>
+
+            </div>
+
+        </div>
+
+
+        {{-- Regenerate missing/out-of-sync --}}
+
+        <div class="card shadow-sm border-0 mb-4">
+
+            <div class="card-body">
+
+                <h4>
+                    ⚡ Regenerate Missing / Out-of-Sync Models
+                </h4>
+
+                <p class="text-muted">
+
+                    Automatically finds models that are missing
+                    or whose schema does not match the database.
+
+                </p>
+
+                <form
+                    method="POST"
+                    action="{{ route('reliese.regenerate.outofsync') }}"
+                    onsubmit="return confirm(
+                    'Regenerate all missing and out-of-sync models?'
+                );">
+
+                    @csrf
+
+                    <button
+                        type="submit"
+                        class="btn btn-warning">
+
+                        ⚡ Regenerate Required Models
+
+                    </button>
+
+                </form>
+
+            </div>
+
+        </div>
+
+
+        {{-- Specific table --}}
+
+        <div class="card shadow-sm border-0">
+
+            <div class="card-header bg-dark text-white">
+
+                Generate Specific Table
+
+            </div>
+
+            <div class="card-body">
+
+                <form
+                    method="POST"
+                    action="{{ route('reliese.generate') }}">
+
+                    @csrf
+
+                    <div class="row g-3">
+
+                        <div class="col-md-9">
+
+                            <select
+                                name="table"
+                                class="form-select"
+                                required>
+
+                                <option value="">
+
+                                    Select database table
+
+                                </option>
+
+                                @foreach($tables as $table)
 
                                 <option
                                     value="{{ $table }}"
-                                    @selected($selectedTable === $table)>
+                                    @selected($selectedTable===$table)>
 
                                     {{ $table }}
 
                                 </option>
 
-                            @endforeach
+                                @endforeach
 
-                        </select>
+                            </select>
+
+                        </div>
+
+
+                        <div class="col-md-3">
+
+                            <button
+                                type="submit"
+                                class="btn btn-primary w-100">
+
+                                Generate Model
+
+                            </button>
+
+                        </div>
 
                     </div>
 
-                    <div class="col-md-3">
+                </form>
 
-                        <button
-                            type="submit"
-                            class="btn btn-primary w-100">
-
-                            Generate Model
-
-                        </button>
-
-                    </div>
-
-                </div>
-
-            </form>
+            </div>
 
         </div>
 
-    </div>
 
-    @if($output)
+        {{-- Output --}}
+
+        @if($output)
 
         <div class="card shadow-sm border-0 mt-4">
 
             <div class="card-header">
+
                 Artisan Output
+
             </div>
 
             <div class="card-body">
 
-                <pre class="bg-dark text-white p-3 rounded mb-0"
+                <pre
+                    class="bg-dark text-white p-3 rounded mb-0"
                     style="white-space: pre-wrap;">{{ $output }}</pre>
 
             </div>
 
         </div>
 
-    @endif
+        @endif
 
-    <div class="alert alert-warning mt-4">
 
-        <strong>Important:</strong>
+        <div class="alert alert-warning mt-4">
 
-        Reliese regenerates files inside
-        <code>app/Models/Base/</code>.
+            <strong>Important:</strong>
 
-        Keep custom application logic inside the main
-        <code>app/Models/</code> classes.
+            Reliese regenerates files inside
+
+            <code>
+                app/Models/Base/
+            </code>
+
+            Keep custom application logic inside the main
+
+            <code>
+                app/Models/
+            </code>
+
+            classes.
+
+        </div>
 
     </div>
 
-</div>
+
+    <script
+        src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js">
+    </script>
 
 </body>
+
 </html>

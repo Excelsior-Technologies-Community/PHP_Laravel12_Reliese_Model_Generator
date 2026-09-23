@@ -7,7 +7,9 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Response;
 use Illuminate\Support\Str;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Throwable;
 
 class RelieseDashboardController extends Controller
@@ -18,6 +20,7 @@ class RelieseDashboardController extends Controller
     public function dashboard()
     {
         $tables = $this->getDatabaseTables();
+
         $modelData = $this->getModelData($tables);
 
         $totalTables = count($tables);
@@ -27,11 +30,20 @@ class RelieseDashboardController extends Controller
             ->count();
 
         $totalRelationships = collect($modelData)
-            ->sum(fn ($model) => count($model['relationships']));
+            ->sum(fn($model) => count($model['relationships']));
 
         $syncedModels = collect($modelData)
             ->where('exists', true)
             ->where('schema_match', true)
+            ->count();
+
+        $missingModels = collect($modelData)
+            ->where('exists', false)
+            ->count();
+
+        $outOfSyncModels = collect($modelData)
+            ->where('exists', true)
+            ->where('schema_match', false)
             ->count();
 
         return view('reliese.dashboard', compact(
@@ -40,12 +52,20 @@ class RelieseDashboardController extends Controller
             'totalTables',
             'totalModels',
             'totalRelationships',
-            'syncedModels'
+            'syncedModels',
+            'missingModels',
+            'outOfSyncModels'
         ));
     }
 
     /**
      * Model explorer.
+     *
+     * Search
+     * Status filter
+     * Schema filter
+     * Sorting
+     * Number-only pagination
      */
     public function models(Request $request)
     {
@@ -53,211 +73,430 @@ class RelieseDashboardController extends Controller
 
         $search = trim($request->get('search', ''));
 
-        $modelData = $this->getModelData($tables);
+        $status = $request->get('status', 'all');
 
+        $schema = $request->get('schema', 'all');
+
+        $sort = $request->get('sort', 'table');
+
+        $direction = $request->get('direction', 'asc');
+
+        $perPage = (int) $request->get('per_page', 5);
+
+        $allowedPerPage = [5, 10, 15, 20];
+
+        if (!in_array($perPage, $allowedPerPage, true)) {
+            $perPage = 5;
+        }
+
+        $modelData = collect(
+            $this->getModelData($tables)
+        );
+
+        /*
+         * Search.
+         */
         if ($search !== '') {
-            $modelData = collect($modelData)
-                ->filter(function ($model) use ($search) {
-                    return Str::contains(
-                        strtolower($model['table']),
-                        strtolower($search)
-                    ) || Str::contains(
+            $modelData = $modelData->filter(function ($model) use ($search) {
+                return Str::contains(
+                    strtolower($model['table']),
+                    strtolower($search)
+                )
+                    ||
+                    Str::contains(
                         strtolower($model['model']),
                         strtolower($search)
                     );
-                })
-                ->values()
-                ->all();
+            });
         }
 
-        return view('reliese.models', compact(
-            'modelData',
-            'search'
-        ));
+        /*
+         * Model status filter.
+         */
+        if ($status === 'generated') {
+            $modelData = $modelData->where('exists', true);
+        }
+
+        if ($status === 'missing') {
+            $modelData = $modelData->where('exists', false);
+        }
+
+        /*
+         * Schema filter.
+         */
+        if ($schema === 'synced') {
+            $modelData = $modelData
+                ->where('exists', true)
+                ->where('schema_match', true);
+        }
+
+        if ($schema === 'check') {
+            $modelData = $modelData
+                ->where('exists', true)
+                ->where('schema_match', false);
+        }
+
+        /*
+         * Sorting.
+         */
+        $allowedSorts = [
+            'table',
+            'model',
+            'column_count',
+            'relationship_count',
+        ];
+
+        if (!in_array($sort, $allowedSorts, true)) {
+            $sort = 'table';
+        }
+
+        if (!in_array($direction, ['asc', 'desc'], true)) {
+            $direction = 'asc';
+        }
+
+        $modelData = $modelData->sortBy(
+            $sort,
+            SORT_NATURAL | SORT_FLAG_CASE,
+            $direction === 'desc'
+        );
+
+        $modelData = $modelData
+            ->values();
+
+        /*
+         * Pagination.
+         */
+        $currentPage = LengthAwarePaginator::resolveCurrentPage();
+
+        $total = $modelData->count();
+
+        $items = $modelData
+            ->slice(
+                ($currentPage - 1) * $perPage,
+                $perPage
+            )
+            ->values();
+
+        $paginator = new LengthAwarePaginator(
+            $items,
+            $total,
+            $perPage,
+            $currentPage,
+            [
+                'path' => $request->url(),
+                'query' => $request->query(),
+            ]
+        );
+
+        return view('reliese.models', [
+            'modelData' => $paginator,
+            'search' => $search,
+            'status' => $status,
+            'schema' => $schema,
+            'sort' => $sort,
+            'direction' => $direction,
+            'perPage' => $perPage,
+        ]);
     }
 
     /**
      * Reliese model generation manager.
      */
-public function generate(Request $request)
-{
-    $tables = $this->getDatabaseTables();
+    public function generate(Request $request)
+    {
+        $tables = $this->getDatabaseTables();
 
-    $selectedTable = $request->input('table');
+        $selectedTable = $request->input('table');
 
-    $message = null;
-    $error = null;
-    $output = null;
+        $message = null;
 
-    if ($request->isMethod('post')) {
-        try {
-            /*
-             * Get the PHP executable used by the current Laravel process.
-             *
-             * On Windows/XAMPP this allows us to execute:
-             * php artisan code:models
-             */
-            $phpBinary = PHP_BINARY;
+        $error = null;
 
-            /*
-             * Laravel project root.
-             */
-            $artisanPath = base_path('artisan');
+        $output = null;
 
-            /*
-             * Generate model for one selected table.
-             */
-            if ($selectedTable) {
+        if ($request->isMethod('post')) {
+
+            try {
+
+                $phpBinary = PHP_BINARY;
+
+                $artisanPath = base_path('artisan');
 
                 /*
-                 * Security check:
-                 * Only allow tables discovered from the current database.
+                 * Generate specific table.
                  */
-                if (!in_array($selectedTable, $tables, true)) {
-                    throw new \Exception(
-                        'Invalid database table selected.'
+                if ($selectedTable) {
+
+                    if (!in_array(
+                        $selectedTable,
+                        $tables,
+                        true
+                    )) {
+                        throw new \Exception(
+                            'Invalid database table selected.'
+                        );
+                    }
+
+                    $result = $this->runRelieseCommand(
+                        $phpBinary,
+                        $artisanPath,
+                        [
+                            'code:models',
+                            '--table=' . $selectedTable,
+                        ]
                     );
+
+                    $output = $result['output'];
+
+                    if ($result['exitCode'] === 0) {
+
+                        $message =
+                            "Reliese model generated successfully for table: {$selectedTable}";
+                    } else {
+
+                        $error =
+                            "Reliese model generation failed for table: {$selectedTable}";
+                    }
                 }
 
                 /*
-                 * Build the command.
-                 *
-                 * Example:
-                 * php artisan code:models --table=products
-                 */
-                $command = sprintf(
-                    '"%s" "%s" code:models --table=%s',
-                    $phpBinary,
-                    $artisanPath,
-                    escapeshellarg($selectedTable)
-                );
+                 * Generate all models.
+                 */ else {
 
-                /*
-                 * Execute the command from the Laravel project directory.
-                 */
-                $process = proc_open(
-                    $command,
-                    [
-                        0 => ['pipe', 'r'],
-                        1 => ['pipe', 'w'],
-                        2 => ['pipe', 'w'],
-                    ],
-                    $pipes,
-                    base_path()
-                );
-
-                if (!is_resource($process)) {
-                    throw new \Exception(
-                        'Unable to start the Reliese model generation process.'
+                    $result = $this->runRelieseCommand(
+                        $phpBinary,
+                        $artisanPath,
+                        [
+                            'code:models',
+                        ]
                     );
+
+                    $output = $result['output'];
+
+                    if ($result['exitCode'] === 0) {
+
+                        $message =
+                            'Reliese models generated successfully for all configured tables.';
+                    } else {
+
+                        $error =
+                            'Reliese model generation failed.';
+                    }
                 }
+            } catch (Throwable $e) {
 
-                fclose($pipes[0]);
+                $error = $e->getMessage();
 
-                $stdout = stream_get_contents($pipes[1]);
-                fclose($pipes[1]);
-
-                $stderr = stream_get_contents($pipes[2]);
-                fclose($pipes[2]);
-
-                $exitCode = proc_close($process);
-
-                $output = trim($stdout);
-
-                if ($stderr !== '') {
-                    $output .= PHP_EOL . trim($stderr);
-                }
-
-                if ($exitCode === 0) {
-                    $message =
-                        "Reliese model generated successfully for table: {$selectedTable}";
-                } else {
-                    $error =
-                        "Reliese model generation failed for table: {$selectedTable}";
-                }
+                $output = ($output ?? '')
+                    . PHP_EOL
+                    . $e->getMessage();
             }
-
-            /*
-             * Generate models for all configured tables.
-             */
-            else {
-
-                /*
-                 * Build:
-                 *
-                 * php artisan code:models
-                 */
-                $command = sprintf(
-                    '"%s" "%s" code:models',
-                    $phpBinary,
-                    $artisanPath
-                );
-
-                /*
-                 * Execute command.
-                 */
-                $process = proc_open(
-                    $command,
-                    [
-                        0 => ['pipe', 'r'],
-                        1 => ['pipe', 'w'],
-                        2 => ['pipe', 'w'],
-                    ],
-                    $pipes,
-                    base_path()
-                );
-
-                if (!is_resource($process)) {
-                    throw new \Exception(
-                        'Unable to start the Reliese model generation process.'
-                    );
-                }
-
-                fclose($pipes[0]);
-
-                $stdout = stream_get_contents($pipes[1]);
-                fclose($pipes[1]);
-
-                $stderr = stream_get_contents($pipes[2]);
-                fclose($pipes[2]);
-
-                $exitCode = proc_close($process);
-
-                $output = trim($stdout);
-
-                if ($stderr !== '') {
-                    $output .= PHP_EOL . trim($stderr);
-                }
-
-                if ($exitCode === 0) {
-                    $message =
-                        'Reliese models generated successfully for all configured tables.';
-                } else {
-                    $error =
-                        'Reliese model generation failed.';
-                }
-            }
-
-        } catch (Throwable $e) {
-
-            $error = $e->getMessage();
-
-            if ($output === null) {
-                $output = '';
-            }
-
-            $output .= PHP_EOL . $e->getMessage();
         }
+
+        return view('reliese.generate', compact(
+            'tables',
+            'selectedTable',
+            'message',
+            'error',
+            'output'
+        ));
     }
 
-    return view('reliese.generate', compact(
-        'tables',
-        'selectedTable',
-        'message',
-        'error',
-        'output'
-    ));
-}
+    /**
+     * Regenerate all missing/out-of-sync models.
+     */
+    public function regenerateOutOfSync()
+    {
+        $tables = $this->getDatabaseTables();
+
+        $modelData = $this->getModelData($tables);
+
+        $targets = collect($modelData)
+            ->filter(function ($model) {
+                return !$model['exists']
+                    || !$model['schema_match'];
+            })
+            ->pluck('table')
+            ->values()
+            ->all();
+
+        if (empty($targets)) {
+
+            return redirect()
+                ->route('reliese.generate')
+                ->with(
+                    'success',
+                    'All models are already generated and synchronized.'
+                );
+        }
+
+        $successCount = 0;
+
+        $failedCount = 0;
+
+        $messages = [];
+
+        foreach ($targets as $table) {
+
+            try {
+
+                $result = $this->runRelieseCommand(
+                    PHP_BINARY,
+                    base_path('artisan'),
+                    [
+                        'code:models',
+                        '--table=' . $table,
+                    ]
+                );
+
+                if ($result['exitCode'] === 0) {
+
+                    $successCount++;
+
+                    $messages[] =
+                        "✓ {$table} generated successfully.";
+                } else {
+
+                    $failedCount++;
+
+                    $messages[] =
+                        "✗ {$table} generation failed.";
+                }
+            } catch (Throwable $e) {
+
+                $failedCount++;
+
+                $messages[] =
+                    "✗ {$table}: {$e->getMessage()}";
+            }
+        }
+
+        return redirect()
+            ->route('reliese.generate')
+            ->with(
+                'success',
+                "Regeneration completed. {$successCount} successful, {$failedCount} failed."
+            )
+            ->with(
+                'generation_details',
+                $messages
+            );
+    }
+
+    /**
+     * Export model report as CSV.
+     */
+    public function exportCsv()
+    {
+        $tables = $this->getDatabaseTables();
+
+        $modelData = $this->getModelData($tables);
+
+        $filename =
+            'reliese-model-report-' .
+            now()->format('Y-m-d-H-i-s') .
+            '.csv';
+
+        $headers = [
+            'Content-Type' => 'text/csv',
+            'Content-Disposition' =>
+            'attachment; filename="' . $filename . '"',
+        ];
+
+        return Response::stream(function () use ($modelData) {
+
+            $handle = fopen('php://output', 'w');
+
+            fputcsv($handle, [
+                'Table',
+                'Model',
+                'Model Status',
+                'Schema Status',
+                'Columns',
+                'Relationships',
+                'Casts',
+                'Fillable Fields',
+                'Base Model',
+                'Main Model',
+            ]);
+
+            foreach ($modelData as $model) {
+
+                fputcsv($handle, [
+                    $model['table'],
+                    $model['model'],
+                    $model['exists']
+                        ? 'Generated'
+                        : 'Missing',
+                    $model['schema_match']
+                        ? 'Synced'
+                        : 'Needs Check',
+                    $model['column_count'],
+                    $model['relationship_count'],
+                    count($model['casts']),
+                    count($model['fillable']),
+                    $model['base_path'],
+                    $model['main_path'],
+                ]);
+            }
+
+            fclose($handle);
+        }, 200, $headers);
+    }
+
+    /**
+     * Export model report as JSON.
+     */
+    public function exportJson()
+    {
+        $tables = $this->getDatabaseTables();
+
+        $modelData = $this->getModelData($tables);
+
+        return response()->json([
+            'generated_at' => now()->toDateTimeString(),
+
+            'summary' => [
+                'total_tables' => count($tables),
+
+                'total_models' =>
+                collect($modelData)
+                    ->where('exists', true)
+                    ->count(),
+
+                'synced_models' =>
+                collect($modelData)
+                    ->where('exists', true)
+                    ->where('schema_match', true)
+                    ->count(),
+
+                'missing_models' =>
+                collect($modelData)
+                    ->where('exists', false)
+                    ->count(),
+
+                'out_of_sync_models' =>
+                collect($modelData)
+                    ->where('exists', true)
+                    ->where('schema_match', false)
+                    ->count(),
+
+                'total_relationships' =>
+                collect($modelData)
+                    ->sum(
+                        fn($model) =>
+                        count($model['relationships'])
+                    ),
+            ],
+
+            'models' => $modelData,
+        ])
+            ->header(
+                'Content-Disposition',
+                'attachment; filename="reliese-model-report.json"'
+            );
+    }
+
     /**
      * Schema comparison.
      */
@@ -271,25 +510,31 @@ public function generate(Request $request)
 
         if (
             $selectedTable &&
-            in_array($selectedTable, $tables, true)
+            in_array(
+                $selectedTable,
+                $tables,
+                true
+            )
         ) {
-            $comparison = $this->compareTableWithModel(
-                $selectedTable
-            );
+
+            $comparison =
+                $this->compareTableWithModel(
+                    $selectedTable
+                );
         }
 
-        return view('reliese.compare', compact(
-            'tables',
-            'selectedTable',
-            'comparison'
-        ));
+        return view(
+            'reliese.compare',
+            compact(
+                'tables',
+                'selectedTable',
+                'comparison'
+            )
+        );
     }
 
     /**
      * Get database tables.
-     *
-     * Tables configured in config/models.php
-     * under the "except" option are excluded.
      */
     private function getDatabaseTables(): array
     {
@@ -301,16 +546,15 @@ public function generate(Request $request)
 
         $tables = collect($rows)
             ->map(function ($row) use ($key) {
+
                 return $row->{$key} ?? null;
             })
             ->filter()
             ->values()
             ->all();
 
-        /*
-         * Respect Reliese's configured excluded tables.
-         */
-        $excludedTables = config('models.except', []);
+        $excludedTables =
+            config('models.except', []);
 
         if (!is_array($excludedTables)) {
             $excludedTables = [];
@@ -318,6 +562,7 @@ public function generate(Request $request)
 
         return collect($tables)
             ->reject(function ($table) use ($excludedTables) {
+
                 return in_array(
                     $table,
                     $excludedTables,
@@ -331,33 +576,44 @@ public function generate(Request $request)
     /**
      * Build model information.
      */
-    private function getModelData(array $tables): array
-    {
+    private function getModelData(
+        array $tables
+    ): array {
+
         return collect($tables)
             ->map(function ($table) {
-                $model = $this->tableToModel($table);
 
-                $basePath = app_path(
-                    'Models/Base/' . $model . '.php'
-                );
+                $model =
+                    $this->tableToModel($table);
 
-                $mainPath = app_path(
-                    'Models/' . $model . '.php'
-                );
+                $basePath =
+                    app_path(
+                        'Models/Base/' .
+                            $model .
+                            '.php'
+                    );
 
-                /*
-                 * Actual database columns.
-                 */
-                $columns = Schema::getColumnListing($table);
+                $mainPath =
+                    app_path(
+                        'Models/' .
+                            $model .
+                            '.php'
+                    );
 
-                /*
-                 * Database column details.
-                 */
-                $columnDetails = collect($columns)
+                $columns =
+                    Schema::getColumnListing(
+                        $table
+                    );
+
+                $columnDetails =
+                    collect($columns)
                     ->map(function ($column) use ($table) {
+
                         return [
                             'name' => $column,
-                            'type' => Schema::getColumnType(
+
+                            'type' =>
+                            Schema::getColumnType(
                                 $table,
                                 $column
                             ),
@@ -366,44 +622,40 @@ public function generate(Request $request)
                     ->values()
                     ->all();
 
-                /*
-                 * Read generated Base model.
-                 */
-                $baseContent = File::exists($basePath)
+                $baseContent =
+                    File::exists($basePath)
                     ? File::get($basePath)
                     : '';
 
-                /*
-                 * Read custom main model.
-                 */
-                $mainContent = File::exists($mainPath)
+                $mainContent =
+                    File::exists($mainPath)
                     ? File::get($mainPath)
                     : '';
 
-                /*
-                 * Extract Reliese information.
-                 */
                 $relationships =
-                    $this->extractRelationships($baseContent);
+                    $this->extractRelationships(
+                        $baseContent
+                    );
 
                 $casts =
-                    $this->extractCasts($baseContent);
+                    $this->extractCasts(
+                        $baseContent
+                    );
 
                 $fillable =
-                    $this->extractFillable($mainContent);
+                    $this->extractFillable(
+                        $mainContent
+                    );
 
                 $modelColumns =
-                    $this->extractModelProperties($baseContent);
+                    $this->extractModelProperties(
+                        $baseContent
+                    );
 
-                /*
-                 * Keep only properties that actually
-                 * exist as database columns.
-                 *
-                 * This prevents relationship properties
-                 * from being treated as database columns.
-                 */
-                $modelColumns = collect($modelColumns)
+                $modelColumns =
+                    collect($modelColumns)
                     ->filter(function ($column) use ($columns) {
+
                         return in_array(
                             $column,
                             $columns,
@@ -413,9 +665,6 @@ public function generate(Request $request)
                     ->values()
                     ->all();
 
-                /*
-                 * Compare database schema with model.
-                 */
                 $schemaMatch =
                     $this->checkSchemaMatch(
                         $columns,
@@ -428,40 +677,40 @@ public function generate(Request $request)
                     'model' => $model,
 
                     'exists' =>
-                        File::exists($basePath),
+                    File::exists($basePath),
 
                     'main_exists' =>
-                        File::exists($mainPath),
+                    File::exists($mainPath),
 
                     'columns' =>
-                        $columnDetails,
+                    $columnDetails,
 
                     'column_count' =>
-                        count($columns),
+                    count($columns),
 
                     'relationships' =>
-                        $relationships,
+                    $relationships,
 
                     'relationship_count' =>
-                        count($relationships),
+                    count($relationships),
 
                     'casts' =>
-                        $casts,
+                    $casts,
 
                     'fillable' =>
-                        $fillable,
+                    $fillable,
 
                     'model_columns' =>
-                        $modelColumns,
+                    $modelColumns,
 
                     'schema_match' =>
-                        $schemaMatch,
+                    $schemaMatch,
 
                     'base_path' =>
-                        $basePath,
+                    $basePath,
 
                     'main_path' =>
-                        $mainPath,
+                    $mainPath,
                 ];
             })
             ->values()
@@ -469,27 +718,97 @@ public function generate(Request $request)
     }
 
     /**
-     * Convert database table name to model name.
-     *
-     * Example:
-     *
-     * products -> Product
-     * categories -> Category
+     * Execute Reliese Artisan command.
      */
-    private function tableToModel(string $table): string
-    {
+    private function runRelieseCommand(
+        string $phpBinary,
+        string $artisanPath,
+        array $arguments
+    ): array {
+
+        $command =
+            '"' .
+            $phpBinary .
+            '" "' .
+            $artisanPath .
+            '"';
+
+        foreach ($arguments as $argument) {
+
+            $command .=
+                ' ' .
+                escapeshellarg($argument);
+        }
+
+        $process = proc_open(
+            $command,
+            [
+                0 => ['pipe', 'r'],
+                1 => ['pipe', 'w'],
+                2 => ['pipe', 'w'],
+            ],
+            $pipes,
+            base_path()
+        );
+
+        if (!is_resource($process)) {
+
+            throw new \Exception(
+                'Unable to start the Reliese model generation process.'
+            );
+        }
+
+        fclose($pipes[0]);
+
+        $stdout =
+            stream_get_contents($pipes[1]);
+
+        fclose($pipes[1]);
+
+        $stderr =
+            stream_get_contents($pipes[2]);
+
+        fclose($pipes[2]);
+
+        $exitCode =
+            proc_close($process);
+
+        $output =
+            trim($stdout);
+
+        if ($stderr !== '') {
+
+            $output .=
+                PHP_EOL .
+                trim($stderr);
+        }
+
+        return [
+            'exitCode' => $exitCode,
+
+            'output' => $output,
+        ];
+    }
+
+    /**
+     * Convert table to model name.
+     */
+    private function tableToModel(
+        string $table
+    ): string {
+
         return Str::studly(
             Str::singular($table)
         );
     }
 
     /**
-     * Extract Eloquent relationships from
-     * generated Reliese Base model.
+     * Extract relationships.
      */
     private function extractRelationships(
         string $content
     ): array {
+
         if ($content === '') {
             return [];
         }
@@ -504,33 +823,39 @@ public function generate(Request $request)
         $relationships = [];
 
         foreach ($matches as $match) {
-            $methodName = $match[1];
-            $body = $match[2];
 
-            /*
-             * Detect Eloquent relationship methods.
-             */
+            $methodName =
+                $match[1];
+
+            $body =
+                $match[2];
+
             if (
                 preg_match(
                     '/\b(hasMany|belongsTo|hasOne|belongsToMany|morphMany|morphOne|morphTo|morphToMany|morphedByMany|hasManyThrough|hasOneThrough)\s*\(/',
                     $body
                 )
             ) {
-                $relationships[] = $methodName;
+
+                $relationships[] =
+                    $methodName;
             }
         }
 
         return array_values(
-            array_unique($relationships)
+            array_unique(
+                $relationships
+            )
         );
     }
 
     /**
-     * Extract casts from generated Base model.
+     * Extract casts.
      */
     private function extractCasts(
         string $content
     ): array {
+
         if ($content === '') {
             return [];
         }
@@ -544,6 +869,7 @@ public function generate(Request $request)
                 $matches
             )
         ) {
+
             preg_match_all(
                 "/['\"]([^'\"]+)['\"]\s*=>\s*['\"]([^'\"]+)['\"]/",
                 $matches[1],
@@ -552,7 +878,9 @@ public function generate(Request $request)
             );
 
             foreach ($castMatches as $cast) {
-                $casts[$cast[1]] = $cast[2];
+
+                $casts[$cast[1]] =
+                    $cast[2];
             }
         }
 
@@ -560,11 +888,12 @@ public function generate(Request $request)
     }
 
     /**
-     * Extract fillable fields from main model.
+     * Extract fillable.
      */
     private function extractFillable(
         string $content
     ): array {
+
         if ($content === '') {
             return [];
         }
@@ -578,24 +907,27 @@ public function generate(Request $request)
                 $matches
             )
         ) {
+
             preg_match_all(
                 "/['\"]([^'\"]+)['\"]/",
                 $matches[1],
                 $fields
             );
 
-            $fillable = $fields[1] ?? [];
+            $fillable =
+                $fields[1] ?? [];
         }
 
         return $fillable;
     }
 
     /**
-     * Extract properties documented by Reliese.
+     * Extract model properties.
      */
     private function extractModelProperties(
         string $content
     ): array {
+
         if ($content === '') {
             return [];
         }
@@ -610,13 +942,13 @@ public function generate(Request $request)
     }
 
     /**
-     * Compare database columns with generated
-     * model properties.
+     * Compare schema.
      */
     private function checkSchemaMatch(
         array $databaseColumns,
         array $modelColumns
     ): bool {
+
         if (empty($databaseColumns)) {
             return true;
         }
@@ -625,14 +957,22 @@ public function generate(Request $request)
             return false;
         }
 
-        $databaseColumns = collect($databaseColumns)
-            ->map(fn ($column) => strtolower($column))
+        $databaseColumns =
+            collect($databaseColumns)
+            ->map(
+                fn($column) =>
+                strtolower($column)
+            )
             ->sort()
             ->values()
             ->all();
 
-        $modelColumns = collect($modelColumns)
-            ->map(fn ($column) => strtolower($column))
+        $modelColumns =
+            collect($modelColumns)
+            ->map(
+                fn($column) =>
+                strtolower($column)
+            )
             ->sort()
             ->values()
             ->all();
@@ -641,46 +981,48 @@ public function generate(Request $request)
     }
 
     /**
-     * Compare a specific database table
-     * against its generated Reliese model.
+     * Compare table with model.
      */
     private function compareTableWithModel(
         string $table
     ): array {
-        $model = $this->tableToModel($table);
 
-        $basePath = app_path(
-            'Models/Base/' . $model . '.php'
-        );
+        $model =
+            $this->tableToModel($table);
 
-        $exists = File::exists($basePath);
+        $basePath =
+            app_path(
+                'Models/Base/' .
+                    $model .
+                    '.php'
+            );
 
-        /*
-         * Database columns.
-         */
+        $exists =
+            File::exists($basePath);
+
         $databaseColumns =
             Schema::getColumnListing($table);
 
         $modelColumns = [];
+
         $casts = [];
+
         $relationships = [];
 
-        /*
-         * Read generated model if it exists.
-         */
         if ($exists) {
-            $content = File::get($basePath);
+
+            $content =
+                File::get($basePath);
 
             $modelColumns =
                 $this->extractModelProperties(
                     $content
                 );
 
-            /*
-             * Keep only actual database columns.
-             */
-            $modelColumns = collect($modelColumns)
+            $modelColumns =
+                collect($modelColumns)
                 ->filter(function ($column) use ($databaseColumns) {
+
                     return in_array(
                         $column,
                         $databaseColumns,
@@ -691,73 +1033,74 @@ public function generate(Request $request)
                 ->all();
 
             $casts =
-                $this->extractCasts($content);
+                $this->extractCasts(
+                    $content
+                );
 
             $relationships =
-                $this->extractRelationships($content);
+                $this->extractRelationships(
+                    $content
+                );
         }
 
-        /*
-         * Normalize database columns.
-         */
-        $databaseLower = collect($databaseColumns)
-            ->map(fn ($column) => strtolower($column));
+        $databaseLower =
+            collect($databaseColumns)
+            ->map(
+                fn($column) =>
+                strtolower($column)
+            );
 
-        /*
-         * Normalize model properties.
-         */
-        $modelLower = collect($modelColumns)
-            ->map(fn ($column) => strtolower($column));
+        $modelLower =
+            collect($modelColumns)
+            ->map(
+                fn($column) =>
+                strtolower($column)
+            );
 
-        /*
-         * Database columns missing from model.
-         */
         $missingFromModel =
             $databaseLower
-                ->diff($modelLower)
-                ->values()
-                ->all();
+            ->diff($modelLower)
+            ->values()
+            ->all();
 
-        /*
-         * Model properties missing from database.
-         */
         $missingFromDatabase =
             $modelLower
-                ->diff($databaseLower)
-                ->values()
-                ->all();
+            ->diff($databaseLower)
+            ->values()
+            ->all();
 
         return [
             'table' =>
-                $table,
+            $table,
 
             'model' =>
-                $model,
+            $model,
 
             'model_exists' =>
-                $exists,
+            $exists,
 
             'database_columns' =>
-                $databaseColumns,
+            $databaseColumns,
 
             'model_columns' =>
-                $modelColumns,
+            $modelColumns,
 
             'missing_from_model' =>
-                $missingFromModel,
+            $missingFromModel,
 
             'missing_from_database' =>
-                $missingFromDatabase,
+            $missingFromDatabase,
 
             'casts' =>
-                $casts,
+            $casts,
 
             'relationships' =>
-                $relationships,
+            $relationships,
 
             'matched' =>
-                empty($missingFromModel)
-                && empty($missingFromDatabase),
+            empty($missingFromModel)
+                &&
+                empty($missingFromDatabase),
         ];
     }
 }
