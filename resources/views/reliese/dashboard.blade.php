@@ -42,6 +42,30 @@
                 </a>
 
                 <a
+                    href="{{ route('reliese.configurator') }}"
+                    class="btn btn-outline-light btn-sm">
+
+                    Configurator
+
+                </a>
+
+                <a
+                    href="{{ route('reliese.er_diagram') }}"
+                    class="btn btn-outline-light btn-sm">
+
+                    ER Diagram
+
+                </a>
+
+                <a
+                    href="{{ route('reliese.diff_sandbox') }}"
+                    class="btn btn-outline-light btn-sm">
+
+                    Diff & Sandbox
+
+                </a>
+
+                <a
                     href="{{ route('reliese.generate') }}"
                     class="btn btn-outline-light btn-sm">
 
