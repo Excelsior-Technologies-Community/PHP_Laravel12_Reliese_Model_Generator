@@ -77,4 +77,40 @@ Route::prefix('reliese')
             '/export/json',
             'exportJson'
         )->name('export.json');
+
+        /*
+        |--------------------------------------------------------------------------
+        | NEW: Reliese Custom Configurator Studio
+        |--------------------------------------------------------------------------
+        */
+
+        Route::get('/configurator', 'configurator')
+            ->name('configurator');
+
+        Route::post('/configurator', 'updateConfig')
+            ->name('configurator.update');
+
+        /*
+        |--------------------------------------------------------------------------
+        | NEW: Database ER Diagram Visualizer
+        |--------------------------------------------------------------------------
+        */
+
+        Route::get('/er-diagram', 'erDiagram')
+            ->name('er_diagram');
+
+        Route::get('/er-diagram-data', 'erDiagramData')
+            ->name('er_diagram.data');
+
+        /*
+        |--------------------------------------------------------------------------
+        | NEW: Live Model Diff & Eloquent Sandbox Playground
+        |--------------------------------------------------------------------------
+        */
+
+        Route::get('/diff-sandbox', 'diffSandbox')
+            ->name('diff_sandbox');
+
+        Route::post('/sandbox/execute', 'executeSandbox')
+            ->name('sandbox.execute');
     });

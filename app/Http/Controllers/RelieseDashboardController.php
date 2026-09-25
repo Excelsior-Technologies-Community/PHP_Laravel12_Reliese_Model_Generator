@@ -12,8 +12,14 @@ use Illuminate\Support\Str;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Throwable;
 
+use App\Services\RelieseStudioService;
+
 class RelieseDashboardController extends Controller
 {
+    public function __construct(
+        protected RelieseStudioService $studioService
+    ) {
+    }
     /**
      * Reliese dashboard.
      */
@@ -538,20 +544,21 @@ class RelieseDashboardController extends Controller
      */
     private function getDatabaseTables(): array
     {
-        $databaseName = DB::getDatabaseName();
+        $activeDbLower = strtolower(DB::getDatabaseName());
+        $allTables = Schema::getTableListing();
 
-        $rows = DB::select('SHOW TABLES');
-
-        $key = 'Tables_in_' . $databaseName;
-
-        $tables = collect($rows)
-            ->map(function ($row) use ($key) {
-
-                return $row->{$key} ?? null;
-            })
-            ->filter()
-            ->values()
-            ->all();
+        $projectTables = [];
+        foreach ($allTables as $t) {
+            if (Str::contains($t, '.')) {
+                [$db, $tbl] = explode('.', $t, 2);
+                if (strtolower($db) === $activeDbLower) {
+                    $projectTables[] = $tbl;
+                }
+            } else {
+                $projectTables[] = $t;
+            }
+        }
+        $tables = array_values(array_unique($projectTables));
 
         $excludedTables =
             config('models.except', []);
@@ -1102,5 +1109,113 @@ class RelieseDashboardController extends Controller
                 &&
                 empty($missingFromDatabase),
         ];
+    }
+
+    /**
+     * Interactive Custom Reliese Configurator Studio View.
+     */
+    public function configurator(Request $request)
+    {
+        $tables = $this->getDatabaseTables();
+        $modelsConfigPath = config_path('models.php');
+        $rawConfig = File::exists($modelsConfigPath) ? File::get($modelsConfigPath) : '';
+
+        $currentConfig = [
+            'namespace' => config('models.namespace', 'App\\Models'),
+            'parent' => config('models.parent', 'Illuminate\\Database\\Eloquent\\Model'),
+            'use_soft_deletes' => config('models.uses.soft_deletes', true),
+            'snake_attributes' => config('models.snake_attributes', true),
+            'dates_format' => config('models.dates.format', 'Y-m-d H:i:s'),
+            'except' => implode(', ', config('models.except', [])),
+        ];
+
+        return view('reliese.configurator', compact('tables', 'currentConfig', 'rawConfig'));
+    }
+
+    /**
+     * Update Reliese Configuration settings.
+     */
+    public function updateConfig(Request $request)
+    {
+        $modelsConfigPath = config_path('models.php');
+
+        $namespace = trim($request->input('namespace', 'App\\Models'));
+        $parent = trim($request->input('parent', 'Illuminate\\Database\\Eloquent\\Model'));
+        $softDeletes = $request->has('use_soft_deletes');
+        $exceptInput = trim($request->input('except', ''));
+        $exceptArray = array_filter(array_map('trim', explode(',', $exceptInput)));
+
+        // Create updated config stub
+        $exceptPhp = var_export($exceptArray, true);
+        $softDeletesPhp = $softDeletes ? 'true' : 'false';
+
+        $configStub = "<?php
+
+return [
+    'namespace' => '{$namespace}',
+    'parent' => '{$parent}',
+    'uses' => [
+        'soft_deletes' => {$softDeletesPhp},
+    ],
+    'except' => {$exceptPhp},
+];
+";
+
+        File::put($modelsConfigPath, $configStub);
+
+        return redirect()->route('reliese.configurator')
+            ->with('success', 'Reliese Model Generator configuration updated successfully.');
+    }
+
+    /**
+     * Database ER Diagram & Relational Dependency Visualizer Studio View.
+     */
+    public function erDiagram(Request $request)
+    {
+        $erData = $this->studioService->getErDiagramData();
+
+        return view('reliese.er-diagram', compact('erData'));
+    }
+
+    /**
+     * ER Diagram JSON Data API Endpoint.
+     */
+    public function erDiagramData(Request $request)
+    {
+        $erData = $this->studioService->getErDiagramData();
+
+        return response()->json([
+            'status' => 'success',
+            'tables_count' => count($erData['tables']),
+            'relationships_count' => count($erData['relationships']),
+            'data' => $erData,
+        ]);
+    }
+
+    /**
+     * Code Inspection, Live Model Diff Inspector & Eloquent Sandbox View.
+     */
+    public function diffSandbox(Request $request)
+    {
+        $tables = $this->getDatabaseTables();
+        $selectedTable = $request->get('table', $tables[0] ?? 'users');
+
+        $diffData = $this->studioService->getModelDiff($selectedTable);
+
+        return view('reliese.diff-sandbox', compact('tables', 'selectedTable', 'diffData'));
+    }
+
+    /**
+     * Execute live read-only Eloquent query in Sandbox API.
+     */
+    public function executeSandbox(Request $request)
+    {
+        $modelName = trim($request->input('model', 'User'));
+        $withRelations = trim($request->input('with', ''));
+        $limit = (int) $request->input('limit', 5);
+
+        $result = $this->studioService->executeSandboxQuery($modelName, $withRelations, $limit);
+
+        return response()->json($result);
     }
 }
